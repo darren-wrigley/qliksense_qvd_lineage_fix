@@ -27,6 +27,9 @@ class mem:
     # memory objects - easier than global vars
     edcSession: EDCSession = EDCSession()
     qvd_table_names = []
+    tables_to_find = []
+    qvd_table_sources = {}  # key = table name, val=list of qvd refs
+    qvd_table_sources_short = {}  # key = table name, val=list of table names
 
 
 def setup_cmd_parser():
@@ -39,8 +42,9 @@ def setup_cmd_parser():
         "--csvFileName",
         default="qliksense_qvd_lineage.csv",
         required=False,
-        help=("csv file to create/write (no folder) "
-              "default=qliksense_qvd_lineage.csv "),
+        help=(
+            "csv file to create/write (no folder) " "default=qliksense_qvd_lineage.csv "
+        ),
     )
     parser.add_argument(
         "-o",
@@ -72,20 +76,24 @@ def setup_cmd_parser():
         required=True,
         help=(
             "custom lineage resource name to create/update - default value=qliksense"
-        )
+        ),
     )
     return parser
 
 
 def find_qliksense_tables(resource_name: str):
     print(f"finding tables in resource {resource_name}")
-    parameters = {"offset": 0, "pageSize": 500,
-                  'q': "core.classType:com.infa.ldm.bi.qlikSense.Table",
-                  'fq': f"core.resourceName:{resource_name}"}
+    parameters = {
+        "offset": 0,
+        "pageSize": 500,
+        "q": "core.classType:com.infa.ldm.bi.qlikSense.Table",
+        "fq": f"core.resourceName:{resource_name}",
+    }
     print(f"\t\tsearching using parms: {parameters}")
 
     # execute catalog rest call, for a page of results
-    resp = mem.edcSession.session.get(mem.edcSession.baseUrl + "/access/2/catalog/data/objects",
+    resp = mem.edcSession.session.get(
+        mem.edcSession.baseUrl + "/access/2/catalog/data/objects",
         params=parameters,
     )
     status = resp.status_code
@@ -98,7 +106,7 @@ def find_qliksense_tables(resource_name: str):
     total = resultJson["metadata"]["totalCount"]
     print(f"objects found: {total}")
 
-    for item in resultJson['items']:
+    for item in resultJson["items"]:
         process_qliksense_table(item)
 
 
@@ -106,7 +114,7 @@ def process_qliksense_table(object: dict):
     app_name = get_parent_obj_name(object)
     table_name = getFactValue(object, "core.name")
     table_expr = getFactValue(object, "com.infa.ldm.bi.qlikSense.Expression")
-    has_qvd_ref = '(qvd)' in table_expr
+    has_qvd_ref = "(qvd)" in table_expr
     print(f"processing table:{table_name} qvd_ref:{has_qvd_ref} app={app_name}")
     if not has_qvd_ref:
         print("\ttable has no qvd ref, skipping")
@@ -114,29 +122,36 @@ def process_qliksense_table(object: dict):
     mem.qvd_table_names.append(table_name)
 
     # extract the referenced qvd object(s) - there might be >1
-    extract_qvd_names(table_expr)
+    extracted = extract_qvd_names(table_expr)
+    print(extracted)
+    mem.tables_to_find.extend(extracted.keys())
+    mem.qvd_table_sources[table_name] = list(extracted.values())
+    mem.qvd_table_sources_short[table_name] = list(extracted.keys())
 
 
 def extract_qvd_names(expr: str):
-    qvds = []
+    qvds = {}
     print("extracting qvd names from expr...")
     regex = r"\[([^]]+.qvd)\]\(qvd\)"
     for match in re.findall(regex, expr):
         print(f"\tmatch...{match}")
         # get the table name - the last entry
-
+        table_ref = match.rsplit("\\")[-1].split(".qvd")[0]
+        qvds[table_ref] = match
     return qvds
+
 
 def get_parent_obj_name(object: dict):
     """
     given a qliksense object- look at the com.infa.ldm.bi.qlikSense.ApplicationTable
     association and get the name
     """
-    for assoc in object['srcLinks']:
+    for assoc in object["srcLinks"]:
         if assoc["association"] == "com.infa.ldm.bi.qlikSense.ApplicationTable":
             return assoc["name"]
     # not found
     return "<<unknown>>"
+
 
 def getFactValue(item, attrName):
     """
@@ -170,6 +185,9 @@ def main():
     find_qliksense_tables(args.qliksense_resource)
 
     print(f"\nfound {len(mem.qvd_table_names)} tables to process")
+    print(
+        f"\t{len(mem.tables_to_find)} tables to find in edc, {len(set(mem.tables_to_find))} unique"
+    )
 
     end_time = time.time()
     # end of main()

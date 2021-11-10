@@ -41,6 +41,10 @@ class mem:
     lineageWriter = csv.writer
     lineage_cache = []
 
+    tables_not_found = []
+
+    links_written = 0
+
 
 def setup_cmd_parser():
     parser = argparse.ArgumentParser(parents=[mem.edcSession.argparser])
@@ -96,9 +100,10 @@ def find_qliksense_tables(resource_name: str):
     parameters = {
         "offset": 0,
         "pageSize": 500,
-        "q": 'core.classType:com.infa.ldm.bi.qlikSense.Table -core.name:"Meta"',
+        "q": 'core.classType:com.infa.ldm.bi.qlikSense.Table',
         "fq": f"core.resourceName:{resource_name}",
     }
+    #  -core.name:"Meta"
     print(f"\t\tsearching using parms: {parameters}")
 
     # execute catalog rest call, for a page of results
@@ -232,6 +237,7 @@ def write_lineage(from_id, to_id, link_type):
     if key not in mem.lineage_cache:
         mem.lineageWriter.writerow([link_type, "", "", from_id, to_id])
         mem.lineage_cache.append(key)
+        mem.links_written += 1
 
 
 def find_ref_table(table_name):
@@ -267,11 +273,15 @@ def find_ref_table(table_name):
     if total == 1:
         mem.tab_cache[table_name] = resultJson["items"][0]
         return resultJson["items"][0]
+    elif total == 0:
+        print(f"no object found for or {table_name}")
     else:
         print("0 or >1 items found...")
 
-    # for item in resultJson["items"]:
-    #     process_qliksense_table(item)
+    mem.tables_not_found.append(table_name)
+
+    # return an empty dict if not found
+    return {}
 
 
 def split_column_ref(in_ref: str):
@@ -394,6 +404,10 @@ def main():
     # end of main()
 
     print(f"tables found: {len(mem.tab_cache)}")
+    print(f"lineage links written: {len(mem.links_written)}")
+    print(f"tables not found: {len(mem.tables_not_found)}")
+    if len(mem.tables_not_found) >0 :
+        print(f"\t{mem.tables_not_found}")
     print(f"Finished - run time = {end_time - start_time:.3f} seconds ---")
 
 

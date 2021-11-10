@@ -17,6 +17,8 @@ import time
 from edcSessionHelper import EDCSession
 import re
 import os
+import csv
+import edcutils
 
 urllib3.disable_warnings()
 
@@ -31,6 +33,13 @@ class mem:
     tables_to_find = []
     qvd_table_sources = {}  # key = table name, val=list of qvd refs
     qvd_table_sources_short = {}  # key = table name, val=list of table names
+
+    resource_name = ""
+
+    tab_cache = {}
+
+    lineageWriter = csv.writer
+    lineage_cache = []
 
 
 def setup_cmd_parser():
@@ -87,7 +96,7 @@ def find_qliksense_tables(resource_name: str):
     parameters = {
         "offset": 0,
         "pageSize": 500,
-        "q": "core.classType:com.infa.ldm.bi.qlikSense.Table",
+        "q": 'core.classType:com.infa.ldm.bi.qlikSense.Table -core.name:"Meta"',
         "fq": f"core.resourceName:{resource_name}",
     }
     print(f"\t\tsearching using parms: {parameters}")
@@ -130,16 +139,15 @@ def process_qliksense_table(object: dict):
     with open(f"./tmp/{table_name}", "w") as f:
         f.write(table_expr.replace("\r", ""))
 
-
     # extract the referenced qvd object(s) - there might be >1
-    extracted = extract_qvd_names(table_expr, table_name)
+    extracted = extract_qvd_names(table_expr, table_name, object)
     print(extracted)
     mem.tables_to_find.extend(extracted.keys())
     mem.qvd_table_sources[table_name] = list(extracted.values())
     mem.qvd_table_sources_short[table_name] = list(extracted.keys())
 
 
-def extract_qvd_names(expr: str, tab_name: str):
+def extract_qvd_names(expr: str, tab_name: str, target_obj: dict):
     qvds = {}
     print("extracting qvd names from expr...")
     statements = expr.split(";")
@@ -157,10 +165,10 @@ def extract_qvd_names(expr: str, tab_name: str):
             with open(f"./tmp/{tab_name}_{st_count}", "w") as f:
                 f.write(statement.replace("\r", ""))
 
-
             print("Statement with qvd>>>")
             print(statement)
             print("Statement with qvd<<<")
+            st_refs = {}
             # get the table name - the last entry
             table_ref = match.rsplit("\\")[-1].split(".qvd")[0]
             qvds[table_ref] = match
@@ -168,39 +176,147 @@ def extract_qvd_names(expr: str, tab_name: str):
             # column extraction
             load_pos = statement.upper().find("LOAD")
             from_pos = statement.upper().find("FROM")
-            col_ref_stmnt = statement[load_pos+4:from_pos]
+            col_ref_stmnt = statement[load_pos + 4 : from_pos]
             # get rid of any distinct
-            col_ref_stmnt = re.sub(r'distinct', '', col_ref_stmnt, flags=re.I)
+            col_ref_stmnt = re.sub(r"distinct", "", col_ref_stmnt, flags=re.I)
             col_stmnts = re.split(col_regex, col_ref_stmnt)
             print(f"columns found... {len(col_stmnts)}")
             for qvd_col in col_stmnts:
                 # col_stmnt = qvd_col.replace("")
                 print(f"\tcol:{qvd_col.strip()}")
-                split_column_ref(qvd_col.strip())
+                to_col, fields = split_column_ref(qvd_col.strip())
+                st_refs[to_col] = fields
 
             print(f"pos'-- {load_pos},{from_pos}")
-            print(col_ref_stmnt)
+            print(st_refs)
+
+            # find the table
+            ref_table_dict = find_ref_table(table_ref)
+            if "id" in ref_table_dict:
+                print(f"ready to link id {ref_table_dict['id']} to {target_obj['id']}")
+                write_lineage(
+                    ref_table_dict["id"], target_obj["id"], "core.DataSetDataFlow"
+                )
+
+                for ref_col in st_refs:
+                    print(f"\tfind col: {ref_col} in target_obj")
+                    to_col_id = get_col_id(target_obj, ref_col)
+                    for from_name in st_refs[ref_col]:
+                        from_col_id = get_col_id(ref_table_dict, from_name)
+                        if from_col_id is None or to_col_id is None:
+                            print("nones....")
+                            continue
+                        print(f"\t\tread to link fields... {from_col_id}>>{to_col_id}")
+                        write_lineage(
+                            from_col_id,
+                            to_col_id,
+                            "core.DirectionalDataFlow",
+                        )
+
+                # find  the columns
 
     return qvds
 
 
+def get_col_id(in_obj, name_to_find):
+    for dst_obj in in_obj["dstLinks"]:
+        if (
+            dst_obj["association"] == "com.infa.ldm.bi.qlikSense.TableColumn"
+            and dst_obj["name"] == name_to_find
+        ):
+            return dst_obj["id"]
+
+
+def write_lineage(from_id, to_id, link_type):
+    key = from_id + ">" + to_id
+    if key not in mem.lineage_cache:
+        mem.lineageWriter.writerow([link_type, "", "", from_id, to_id])
+        mem.lineage_cache.append(key)
+
+
+def find_ref_table(table_name):
+    print(f"finding table {table_name} in cache={table_name in mem.tab_cache}")
+
+    if table_name in mem.tab_cache:
+        print(f"using cache for {table_name}")
+        return mem.tab_cache[table_name]
+
+    parameters = {
+        "offset": 0,
+        "pageSize": 10,
+        "q": "core.classType:com.infa.ldm.bi.qlikSense.Table",
+        "fq": [f"core.resourceName:{mem.resource_name}", f'core.name:"{table_name}"'],
+    }
+    print(f"\t\tsearching using parms: {parameters}")
+
+    # execute catalog rest call, for a page of results
+    resp = mem.edcSession.session.get(
+        mem.edcSession.baseUrl + "/access/2/catalog/data/objects",
+        params=parameters,
+    )
+    status = resp.status_code
+    if status != 200:
+        # some error - e.g. catalog not running, or bad credentials
+        print("error! " + str(status) + str(resp.json()))
+        return None
+
+    resultJson = resp.json()
+    total = resultJson["metadata"]["totalCount"]
+    print(f"objects found: {total}")
+
+    if total == 1:
+        mem.tab_cache[table_name] = resultJson["items"][0]
+        return resultJson["items"][0]
+    else:
+        print("0 or >1 items found...")
+
+    # for item in resultJson["items"]:
+    #     process_qliksense_table(item)
+
+
 def split_column_ref(in_ref: str):
     print(f"splitting col... {in_ref}")
-    ret = []
-    if "as" in in_ref:
-        vals = in_ref.split("as")
-        print("as found...")
-        print(vals)
-        ret.append(vals[0].strip())
-        ret.append(vals[1].strip())
+    ret = {}
+    to_col = in_ref
+    fm_expr = in_ref
+    split_ref = re.split(r"\s+AS\s+", in_ref, flags=re.I)
+    print(split_ref)
+    if len(split_ref) == 1:
+        pass
     else:
-        print("no as ")
-        print(in_ref)
-        ret.append(in_ref)
+        to_col = split_ref[1]
+        fm_expr = split_ref[0]
+
+    if "[" in to_col:
+        to_col = to_col.replace("[", "").replace("]", "")
+    if '"' in to_col:
+        to_col = to_col.replace('"', "")
+
+    print(f"to_col={to_col} expr={fm_expr}")
+    ref_fields = get_field_possibles(fm_expr)
+    ret[to_col] = ref_fields
 
     print(f"returning:{ret}")
-    return ret
+    return to_col, ref_fields
 
+
+def get_field_possibles(expr: str):
+    # check for quoted strings, [] strings and words or words_words
+    refs = []
+    quoted_strings = re.findall(r'"([^"]+)"', expr)
+    square_strings = re.findall(r"\[([^]]+)\]", expr)
+    refs.extend(quoted_strings)
+    refs.extend(square_strings)
+    if len(refs) == 0:
+        # find words
+        # if there is no "(" - just return the words
+        if "(" not in refs:
+            refs.append(expr)
+        else:
+            print("not sure what to do here")
+
+    print(f"\trefs={refs}")
+    return refs
 
 
 def get_parent_obj_name(object: dict):
@@ -244,7 +360,9 @@ def main():
     print(f"command-line args parsed = {args} ")
 
     # since -rn is mandatoy, we only get here if a resource is specified
-    find_qliksense_tables(args.qliksense_resource)
+    mem.resource_name = args.qliksense_resource
+    init_lineage(args.outDir)
+    find_qliksense_tables(mem.resource_name)
 
     print(f"\nfound {len(mem.qvd_table_names)} tables to process")
     print(
@@ -252,16 +370,51 @@ def main():
     )
     print("qvd references...")
     print("qvd_file,qvd_table,used_by_table")
-    for k,v in mem.qvd_table_sources.items():
+    for k, v in mem.qvd_table_sources.items():
         # print(f"\t{k}")
         for qvd in v:
-            tab_name = qvd.rsplit('\\')[-1].split('.qvd')[0]
+            tab_name = qvd.rsplit("\\")[-1].split(".qvd")[0]
             print(f"{qvd},{tab_name},{k}")
 
-
+    mem.fLineage.close()
     end_time = time.time()
+
+    # starting custom linege import
+    print("calling lineage impport")
+    edcutils.createOrUpdateAndExecuteResourceUsingSession(
+        mem.edcSession.baseUrl,
+        mem.edcSession.session,
+        mem.resource_name + "_lineage",
+        "template/custom_lineage_template_no_auto.json",
+        mem.resource_name + "_lineage.csv",
+        args.outDir + "/" + mem.resource_name + "_lineage.csv",
+        False,
+        "LineageScanner",
+    )
     # end of main()
+
+    print(f"tables found: {len(mem.tab_cache)}")
     print(f"Finished - run time = {end_time - start_time:.3f} seconds ---")
+
+
+def init_lineage(out_folder):
+    if not os.path.exists(out_folder):
+        print(f"creating folder ./{out_folder}")
+        os.makedirs(out_folder)
+
+    mem.fLineage = open(
+        os.path.join(out_folder, mem.resource_name + "_lineage.csv"), "w"
+    )
+    mem.lineageWriter = csv.writer(mem.fLineage, lineterminator="\n")
+    mem.lineageWriter.writerow(
+        [
+            "Association",
+            "From Connection",
+            "To Connection",
+            "From Object",
+            "To Object",
+        ]
+    )
 
 
 if __name__ == "__main__":

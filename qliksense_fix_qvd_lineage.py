@@ -404,7 +404,7 @@ def main():
     # end of main()
 
     print(f"tables found: {len(mem.tab_cache)}")
-    print(f"lineage links written: {len(mem.links_written)}")
+    print(f"lineage links written: {mem.links_written}")
     print(f"tables not found: {len(mem.tables_not_found)}")
     if len(mem.tables_not_found) >0 :
         print(f"\t{mem.tables_not_found}")

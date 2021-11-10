@@ -8,8 +8,11 @@ Purpose: if the qliksense scanner for EDC is not creating lineage between qvd ta
                - find the referenced qvd table
                  - if found - will generate linegae at table and column level
                    using direct id's (sinde we are looking them up here)
+                   to do this - we need to parse the load statement, and seperate each column
+                   since there could be as references to re-name the target
 
-         - optionally, create a custom lineage resource and execute the import
+         - create a custom lineage resource (if not alread created)
+           with name <qlik_resource>_lineage and execute the import
 """
 import urllib3
 import argparse
@@ -22,8 +25,6 @@ import edcutils
 
 urllib3.disable_warnings()
 
-# set edc helper session + variables (easy/re-useable connection to edc api)
-# edcSession = EDCSession()
 
 
 class mem:
@@ -33,33 +34,26 @@ class mem:
     tables_to_find = []
     qvd_table_sources = {}  # key = table name, val=list of qvd refs
     qvd_table_sources_short = {}  # key = table name, val=list of table names
-
     resource_name = ""
-
     tab_cache = {}
-
     lineageWriter = csv.writer
     lineage_cache = []
-
     tables_not_found = []
-
     links_written = 0
 
 
 def setup_cmd_parser():
     parser = argparse.ArgumentParser(parents=[mem.edcSession.argparser])
-    # define script command-line parameters (in global scope for gooey/wooey)
-
     # add args specific to this utility (left/right resource, schema, classtype...)
-    parser.add_argument(
-        "-f",
-        "--csvFileName",
-        default="qliksense_qvd_lineage.csv",
-        required=False,
-        help=(
-            "csv file to create/write (no folder) " "default=qliksense_qvd_lineage.csv "
-        ),
-    )
+    # parser.add_argument(
+    #     "-f",
+    #     "--csvFileName",
+    #     default="qliksense_qvd_lineage.csv",
+    #     required=False,
+    #     help=(
+    #         "csv file to create/write (no folder) " "default=qliksense_qvd_lineage.csv "
+    #     ),
+    # )
     parser.add_argument(
         "-o",
         "--outDir",
@@ -390,18 +384,21 @@ def main():
     end_time = time.time()
 
     # starting custom linege import
-    print("calling lineage impport")
-    edcutils.createOrUpdateAndExecuteResourceUsingSession(
-        mem.edcSession.baseUrl,
-        mem.edcSession.session,
-        mem.resource_name + "_lineage",
-        "template/custom_lineage_template_no_auto.json",
-        mem.resource_name + "_lineage.csv",
-        args.outDir + "/" + mem.resource_name + "_lineage.csv",
-        False,
-        "LineageScanner",
-    )
-    # end of main()
+    if not args.edcimport:
+        print("lineage csv file is written but not imported into EDC, use -i flag to enable that")
+    else:
+        print("calling lineage import (-i flag used")
+        edcutils.createOrUpdateAndExecuteResourceUsingSession(
+            mem.edcSession.baseUrl,
+            mem.edcSession.session,
+            mem.resource_name + "_lineage",
+            "template/custom_lineage_template_no_auto.json",
+            mem.resource_name + "_lineage.csv",
+            args.outDir + "/" + mem.resource_name + "_lineage.csv",
+            False,
+            "LineageScanner",
+        )
+        # end of main()
 
     print(f"tables found: {len(mem.tab_cache)}")
     print(f"lineage links written: {mem.links_written}")
